@@ -91,6 +91,11 @@ dependencies = [
 
 [project.optional-dependencies]
 flash-attn = ["flash-attn==2.8.3"]
+# marin fork: Supabase model-registration plugin (integrations/supabase_registry)
+supabase = [
+    "supabase",
+    "python-dotenv",
+]
 ring-flash-attn = [
     "flash-attn==2.8.3",
     "ring-flash-attn>=0.1.7",

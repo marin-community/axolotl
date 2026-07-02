@@ -1,0 +1,25 @@
+{
+  "A_default_true": {
+    "files": [
+      "chat_template.jinja",
+      "special_tokens_map.json",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ],
+    "config_has_chat_template": false,
+    "config_chat_template": null,
+    "jinja_file_exists": true,
+    "jinja_file_contents": "<389 chars>"
+  },
+  "B_flag_false": {
+    "files": [
+      "special_tokens_map.json",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ],
+    "config_has_chat_template": true,
+    "config_chat_template": "<389 chars>",
+    "jinja_file_exists": false,
+    "jinja_file_contents": null
+  }
+}
