@@ -123,3 +123,68 @@ def register_chat_template(template_name: str, chat_template: str):
         raise ValueError(f"Template '{template_name}' already exists.")
 
     _CHAT_TEMPLATES[template_name] = chat_template
+
+
+# Substrings that a chat template must contain to be able to render tool
+# definitions (the ``tools`` kwarg) and/or tool-call / tool-result turns. A
+# template lacking all of these cannot express tool-calling, so a serving stack
+# (e.g. vLLM) that is handed ``tools`` will silently drop them.
+_TOOL_TEMPLATE_MARKERS = (
+    "tool_calls",
+    "tool_call",
+    "tool_response",
+    "if tools",  # `{% if tools %}` / `{%- if tools %}` after whitespace-strip normalization
+    "'tool'",
+    '"tool"',
+)
+
+
+def template_handles_tools(template: str | None) -> bool:
+    """Best-effort check for whether a chat template can render tool calls.
+
+    Detects the two things a tool-capable template needs: a reference to the
+    ``tools`` kwarg (so tool *definitions* injected at inference time are rendered)
+    and/or handling of ``tool_calls`` / ``role == "tool"`` turns. A bare ChatML
+    template (``<|im_start|>{role}\\n{content}<|im_end|>``) matches none of these.
+
+    This is intentionally conservative (substring based, no jinja parse): it only
+    reports ``True`` when explicit tool markers are present, which is enough to
+    flag a tool-capable -> tool-blind downgrade at save time.
+    """
+    if not template:
+        return False
+    # Normalize jinja whitespace-control so `{%- if tools %}` matches `if tools`.
+    normalized = template.replace("{%-", "{%").replace("-%}", "%}")
+    return any(marker in normalized for marker in _TOOL_TEMPLATE_MARKERS)
+
+
+def resolve_export_chat_template(
+    base_template: str | None,
+    configured_template: str,
+    preserve_tool_capable: bool = True,
+) -> tuple[str, bool]:
+    """Pick the chat template to persist on the tokenizer for inference/export.
+
+    Axolotl overwrites ``tokenizer.chat_template`` with the config-chosen template
+    purely so it is saved for inference (training itself renders with the resolved
+    template passed explicitly to ``apply_chat_template``). When a config sets e.g.
+    ``chat_template: chatml`` on top of a base model whose own template was
+    tool-capable (e.g. Qwen3's ``{% if tools %}`` / ``<tool_call>`` template), that
+    overwrite silently downgrades the *saved* template to a tool-blind one -> the
+    exported model can no longer tool-call at serve time (the "0% SWE-bench" footgun).
+
+    Returns ``(template_to_save, downgrade_averted)``:
+      * If ``preserve_tool_capable`` and the base template handles tools but the
+        configured template does not, returns ``(base_template, True)`` so the
+        tool-capable template survives export.
+      * Otherwise returns ``(configured_template, False)`` — the explicit config
+        choice is respected (never silently overridden when no tool capability is lost).
+    """
+    if (
+        preserve_tool_capable
+        and base_template
+        and template_handles_tools(base_template)
+        and not template_handles_tools(configured_template)
+    ):
+        return base_template, True
+    return configured_template, False

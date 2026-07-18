@@ -14,7 +14,11 @@ from axolotl.integrations.base import PluginManager
 from axolotl.loaders.utils import get_linear_embedding_layers, load_model_config
 from axolotl.prompt_tokenizers import LLAMA_DEFAULT_EOS_TOKEN
 from axolotl.telemetry.errors import send_errors
-from axolotl.utils.chat_templates import get_chat_template_from_config
+from axolotl.utils.chat_templates import (
+    get_chat_template_from_config,
+    resolve_export_chat_template,
+    template_handles_tools,
+)
 from axolotl.utils.dict import DictDefault
 from axolotl.utils.distributed import (
     barrier,
@@ -314,6 +318,12 @@ def load_tokenizer(cfg: DictDefault) -> PreTrainedTokenizer:
         LOG.debug(f"UNK: {tokenizer.unk_token_id} / {tokenizer.unk_token}")
 
     if cfg.chat_template:
+        # The base model's own template, before we overwrite it below. Training
+        # renders with `chat_template_string` (passed explicitly to
+        # apply_chat_template), so this overwrite only affects what is SAVED for
+        # inference. We use the base template to detect a tool-capability downgrade.
+        base_chat_template = getattr(tokenizer, "chat_template", None)
+
         chat_template_string = get_chat_template_from_config(
             cfg=cfg,
             tokenizer=tokenizer,
@@ -323,7 +333,45 @@ def load_tokenizer(cfg: DictDefault) -> PreTrainedTokenizer:
                 "You are a helpful assistant.", cfg.default_system_message
             )
 
-        tokenizer.chat_template = chat_template_string
+        # Guard the "0% SWE-bench" footgun: if the config-chosen template (e.g.
+        # `chat_template: chatml`) would strip a tool-capable base template down to
+        # a tool-blind one, the exported tokenizer can no longer tool-call at serve
+        # time even though training was healthy. Preserve the base tool-capable
+        # template for export instead of silently downgrading it.
+        preserve_tool_capable = (
+            cfg.get("preserve_tool_capable_chat_template") is not False
+        )
+        template_to_save, downgrade_averted = resolve_export_chat_template(
+            base_template=base_chat_template,
+            configured_template=chat_template_string,
+            preserve_tool_capable=preserve_tool_capable,
+        )
+        if downgrade_averted:
+            LOG.warning(
+                "chat_template '%s' does not render tool calls, but the base model's "
+                "chat_template does. Preserving the base model's tool-capable "
+                "chat_template on the saved tokenizer so tool-calling survives at "
+                "inference (training still renders with '%s'). Set "
+                "`preserve_tool_capable_chat_template: false` to keep the configured "
+                "template on export instead.",
+                cfg.chat_template,
+                cfg.chat_template,
+            )
+        elif (
+            base_chat_template
+            and template_handles_tools(base_chat_template)
+            and not template_handles_tools(chat_template_string)
+        ):
+            # Downgrade detected but preservation disabled — warn loudly.
+            LOG.warning(
+                "chat_template '%s' does not render tool calls but the base model's "
+                "chat_template does; `preserve_tool_capable_chat_template: false` is "
+                "set, so the exported tokenizer will NOT be able to tool-call at "
+                "inference.",
+                cfg.chat_template,
+            )
+
+        tokenizer.chat_template = template_to_save
     elif getattr(tokenizer, "chat_template", None) is None:
         LOG.info(
             "No Chat template selected. Consider adding a chat template for easier inference."
