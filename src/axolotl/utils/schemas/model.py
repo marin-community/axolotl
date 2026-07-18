@@ -76,6 +76,19 @@ class ModelInputConfig(BaseModel):
             "description": "Whether to save jinja files for tokenizer, transformers default is True"
         },
     )
+    preserve_tool_capable_chat_template: bool | None = Field(
+        default=True,
+        json_schema_extra={
+            "description": (
+                "When a `chat_template` override would strip a tool-capable base-model "
+                "template down to a tool-blind one (e.g. `chat_template: chatml` on a "
+                "Qwen3 base), preserve the base model's tool-capable template on the "
+                "saved tokenizer so tool-calling survives at inference. Training still "
+                "renders with the configured template. Set to false to export the "
+                "configured template as-is."
+            )
+        },
+    )
     trust_remote_code: bool | None = Field(
         default=None,
         json_schema_extra={"description": "Trust remote code for untrusted source"},
