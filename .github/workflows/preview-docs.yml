@@ -6,8 +6,8 @@ on:
 
     # Run the workflow only when one of these files changes
     paths:
-      - '**/*.md'      # any Markdown file
-      - '**/*.qmd'     # any Quarto file
+      - 'docs/**/*.md'
+      - 'docs/**/*.qmd'
       - '_quarto.yml'
       - docs/scripts/generate_config_docs.py
       - src/axolotl/utils/schemas/**.py
@@ -41,7 +41,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install dependencies
         run: |
