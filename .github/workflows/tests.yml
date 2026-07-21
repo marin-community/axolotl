@@ -85,7 +85,10 @@ jobs:
             "${isolated_args[@]}" \
             tests/ --cov=axolotl --cov-report=
           for suite in "${isolated_suites[@]}"; do
-            pytest -v --durations="${PYTEST_DURATION_COUNT}" "${suite}" \
+            # Optional ML dependencies can leave non-daemon threads behind on CPU.
+            # Exit after pytest finalizes its result and coverage data.
+            python -c 'import os, sys, pytest; os._exit(pytest.main(sys.argv[1:]))' \
+              -v --durations="${PYTEST_DURATION_COUNT}" "${suite}" \
               --cov=axolotl --cov-append --cov-report=
           done
           coverage report --show-missing --skip-covered
