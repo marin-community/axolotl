@@ -21,7 +21,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _common import TOOLCALL_CONVO, TOOLS, load_tokenizer, ok, read_delphi_template  # noqa: E402
+from _common import (  # noqa: E402
+    TOOLCALL_CONVO,
+    TOOLS,
+    load_tokenizer,
+    ok,
+    read_delphi_template,
+)
 
 # repair.py is deliberately dependency-free (no torch/axolotl), so import it directly by
 # path — the full axolotl package won't import without its CUDA stack (not installable on

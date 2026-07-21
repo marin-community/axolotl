@@ -220,6 +220,26 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 docstring-code-format = false
 
+[tool.marin-style]
+checks = ["ruff-check"]
+ruff_version = "0.15.8"
+include = [
+    "scripts/marin_fork_gates/**",
+    "src/axolotl/integrations/mfu/**",
+    "src/axolotl/integrations/supabase_registry/**",
+    "src/axolotl/integrations/template_integrity/**",
+    "src/axolotl/utils/chat_templates/__init__.py",
+    "src/axolotl/utils/chat_templates/base.py",
+    "src/axolotl/utils/data/lock.py",
+    "tests/test_chat_template_export.py",
+    "infra/**",
+]
+exclude = [
+    "scripts/marin_fork_gates/stage4_supabase.py",
+    "scripts/marin_fork_gates/stage5_integration.py",
+    "src/axolotl/integrations/supabase_registry/db/utils.py",
+]
+
 [tool.pytest.ini_options]
 addopts = "-m 'not slow'"
 markers = [

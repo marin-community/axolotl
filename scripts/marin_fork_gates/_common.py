@@ -9,7 +9,6 @@ Env: /Users/benjaminfeuer/miniconda3/envs/otagent/bin/python (transformers 4.57.
 the fork pins 5.12.1 — the save_jinja_files pop/re-embed mechanism is identical in both).
 """
 import json
-import os
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
