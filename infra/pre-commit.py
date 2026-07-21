@@ -7,11 +7,7 @@
 #     "marin-style @ git+https://github.com/marin-community/marin-style@ccbf03e7ca58486d61fff7a4e73031673d7fd8a4",
 # ]
 # ///
-"""Consumer-repo pre-commit shim. Delegates to the shared marin-style checks.
-
-Committed at `infra/pre-commit.py`; the `commit` skill and CI invoke it directly.
-The checks are scoped to the Marin delta through `[tool.marin-style]`.
-"""
+"""Run shared checks for the Marin-owned Axolotl delta."""
 
 from marin_style.precommit import main
 
