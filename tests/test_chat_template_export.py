@@ -142,6 +142,10 @@ class TestLoadTokenizerToolPreservation:
         base_tok = load_tokenizer(base_cfg)
         base_tok.chat_template = TOOLS_AWARE_TEMPLATE
         base_tok.save_pretrained(base_dir)
+        with open(
+            os.path.join(base_dir, "config.json"), "w", encoding="utf-8"
+        ) as handle:
+            json.dump({"model_type": "llama"}, handle)
 
     @enable_hf_offline
     def test_chatml_override_preserves_base_tools(self, temp_dir):

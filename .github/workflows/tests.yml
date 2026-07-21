@@ -65,7 +65,27 @@ jobs:
           hf download --repo-type=dataset axolotl-ai-internal/axolotl-oss-dataset-fixtures
 
       - name: Run CPU tests
-        run: >-
-          pytest -v --durations=20 -n auto --dist loadfile
-          --ignore=tests/e2e/ tests/
-          --cov=axolotl --cov-report=term-missing:skip-covered
+        run: |
+          pytest -v --durations=20 -n auto --dist loadfile \
+            --ignore=tests/e2e/ \
+            --ignore=tests/monkeypatch/ \
+            --ignore=tests/patched/ \
+            --ignore=tests/cli/ \
+            --ignore=tests/utils/ \
+            --ignore=tests/integrations/ \
+            --ignore=tests/test_logging_config_file_capture.py \
+            --ignore=tests/test_utils_tee.py \
+            tests/ --cov=axolotl --cov-report=
+          pytest -v --durations=20 tests/monkeypatch/ \
+            --cov=axolotl --cov-append --cov-report=
+          pytest -v --durations=20 tests/patched/ \
+            --cov=axolotl --cov-append --cov-report=
+          pytest -v --durations=20 tests/cli/ \
+            --cov=axolotl --cov-append --cov-report=
+          pytest -v --durations=20 tests/utils/ \
+            --cov=axolotl --cov-append --cov-report=
+          pytest -v --durations=20 tests/integrations/ \
+            --cov=axolotl --cov-append --cov-report=
+          pytest -v --durations=20 \
+            tests/test_logging_config_file_capture.py tests/test_utils_tee.py \
+            --cov=axolotl --cov-append --cov-report=term-missing:skip-covered
