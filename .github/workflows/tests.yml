@@ -67,25 +67,24 @@ jobs:
 
       - name: Run CPU tests
         run: |
+          isolated_suites=(
+            tests/monkeypatch/
+            tests/patched/
+            tests/cli/
+            tests/utils/
+            tests/integrations/
+            tests/test_logging_config_file_capture.py
+            tests/test_utils_tee.py
+          )
+          isolated_args=()
+          for suite in "${isolated_suites[@]}"; do
+            isolated_args+=(--ignore="${suite}")
+          done
           pytest -v --durations="${PYTEST_DURATION_COUNT}" -n auto --dist loadfile \
             --ignore=tests/e2e/ \
-            --ignore=tests/monkeypatch/ \
-            --ignore=tests/patched/ \
-            --ignore=tests/cli/ \
-            --ignore=tests/utils/ \
-            --ignore=tests/integrations/ \
-            --ignore=tests/test_logging_config_file_capture.py \
-            --ignore=tests/test_utils_tee.py \
+            "${isolated_args[@]}" \
             tests/ --cov=axolotl --cov-report=
-          for suite in \
-            tests/monkeypatch/ \
-            tests/patched/ \
-            tests/cli/ \
-            tests/utils/ \
-            tests/integrations/ \
-            tests/test_logging_config_file_capture.py \
-            tests/test_utils_tee.py
-          do
+          for suite in "${isolated_suites[@]}"; do
             pytest -v --durations="${PYTEST_DURATION_COUNT}" "${suite}" \
               --cov=axolotl --cov-append --cov-report=
           done
