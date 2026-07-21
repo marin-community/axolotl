@@ -77,7 +77,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../../site_libs/quarto-html/quarto-syntax-highlighting-dark-0a6b7249c26820e032cb0bd839ff02b1.css" rel="stylesheet" id="quarto-text-highlighting-styles">
 <script src="../../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../../site_libs/bootstrap/bootstrap-38e438262e49c04e0d6134760b85b11b.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="dark">
+<link href="../../site_libs/bootstrap/bootstrap-e04513b8436e92d6db167ae2511f8e79.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="dark">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -834,6 +834,13 @@ gtag('config', 'G-9KYCVJBNMQ', { 'anonymize_ip': true});
 <p>Simple class for abstracting single process data loading / processing. The first
 process that creates a lock file does the work; the remaining procesees simply load
 the preprocessed dataset once the first process is done.</p>
+<p>Lock-free fast path: if a prior (e.g.&nbsp;single-process <code>axolotl preprocess</code>) build
+persisted COMPLETE_FILE_NAME, every rank loads the prepared dataset lock-free. This
+avoids the shared-FS advisory FileLock, which returns ENOLCK (“No locks available”) /
+ESTALE (“Stale file handle”) on networked filesystems (Lustre/NFS) under many-rank
+concurrency. axolotl loads datasets BEFORE the process group is initialized, so it
+cannot coordinate with a torch.distributed barrier (as LlamaFactory’s
+<code>main_process_first</code> does) and falls back to this filesystem lock.</p>
 <section id="methods" class="level4">
 <h4 class="anchored" data-anchor-id="methods">Methods</h4>
 <table class="caption-top table">

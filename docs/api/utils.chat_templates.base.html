@@ -77,7 +77,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <link href="../../site_libs/quarto-html/quarto-syntax-highlighting-dark-0a6b7249c26820e032cb0bd839ff02b1.css" rel="stylesheet" id="quarto-text-highlighting-styles">
 <script src="../../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../../site_libs/bootstrap/bootstrap-38e438262e49c04e0d6134760b85b11b.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="dark">
+<link href="../../site_libs/bootstrap/bootstrap-e04513b8436e92d6db167ae2511f8e79.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="dark">
 <script id="quarto-search-options" type="application/json">{
   "location": "navbar",
   "copy-button": false,
@@ -798,6 +798,8 @@ gtag('config', 'G-9KYCVJBNMQ', { 'anonymize_ip': true});
   <ul class="collapse">
   <li><a href="#axolotl.utils.chat_templates.base.get_chat_template" id="toc-axolotl.utils.chat_templates.base.get_chat_template" class="nav-link" data-scroll-target="#axolotl.utils.chat_templates.base.get_chat_template">get_chat_template</a></li>
   <li><a href="#axolotl.utils.chat_templates.base.register_chat_template" id="toc-axolotl.utils.chat_templates.base.register_chat_template" class="nav-link" data-scroll-target="#axolotl.utils.chat_templates.base.register_chat_template">register_chat_template</a></li>
+  <li><a href="#axolotl.utils.chat_templates.base.resolve_export_chat_template" id="toc-axolotl.utils.chat_templates.base.resolve_export_chat_template" class="nav-link" data-scroll-target="#axolotl.utils.chat_templates.base.resolve_export_chat_template">resolve_export_chat_template</a></li>
+  <li><a href="#axolotl.utils.chat_templates.base.template_handles_tools" id="toc-axolotl.utils.chat_templates.base.template_handles_tools" class="nav-link" data-scroll-target="#axolotl.utils.chat_templates.base.template_handles_tools">template_handles_tools</a></li>
   </ul></li>
   </ul></li>
   </ul>
@@ -830,6 +832,14 @@ gtag('config', 'G-9KYCVJBNMQ', { 'anonymize_ip': true});
 <tr class="even">
 <td><a href="#axolotl.utils.chat_templates.base.register_chat_template">register_chat_template</a></td>
 <td>Registers chat templates.</td>
+</tr>
+<tr class="odd">
+<td><a href="#axolotl.utils.chat_templates.base.resolve_export_chat_template">resolve_export_chat_template</a></td>
+<td>Pick the chat template to persist on the tokenizer for inference/export.</td>
+</tr>
+<tr class="even">
+<td><a href="#axolotl.utils.chat_templates.base.template_handles_tools">template_handles_tools</a></td>
+<td>Best-effort check for whether a chat template can render tool calls.</td>
 </tr>
 </tbody>
 </table>
@@ -954,9 +964,43 @@ gtag('config', 'G-9KYCVJBNMQ', { 'anonymize_ip': true});
 </tr>
 </tbody>
 </table>
-
-
 </section>
+</section>
+<section id="axolotl.utils.chat_templates.base.resolve_export_chat_template" class="level3">
+<h3 class="anchored" data-anchor-id="axolotl.utils.chat_templates.base.resolve_export_chat_template">resolve_export_chat_template</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>utils.chat_templates.base.resolve_export_chat_template(</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    base_template,</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    configured_template,</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    preserve_tool_capable<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Pick the chat template to persist on the tokenizer for inference/export.</p>
+<p>Axolotl overwrites <code>tokenizer.chat_template</code> with the config-chosen template
+purely so it is saved for inference (training itself renders with the resolved
+template passed explicitly to <code>apply_chat_template</code>). When a config sets e.g.
+<code>chat_template: chatml</code> on top of a base model whose own template was
+tool-capable (e.g.&nbsp;Qwen3’s <code>{% if tools %}</code> / <code>&lt;tool_call&gt;</code> template), that
+overwrite silently downgrades the <em>saved</em> template to a tool-blind one -&gt; the
+exported model can no longer tool-call at serve time (the “0% SWE-bench” footgun).</p>
+<p>Returns <code>(template_to_save, downgrade_averted)</code>:
+* If <code>preserve_tool_capable</code> and the base template handles tools but the
+configured template does not, returns <code>(base_template, True)</code> so the
+tool-capable template survives export.
+* Otherwise returns <code>(configured_template, False)</code> — the explicit config
+choice is respected (never silently overridden when no tool capability is lost).</p>
+</section>
+<section id="axolotl.utils.chat_templates.base.template_handles_tools" class="level3">
+<h3 class="anchored" data-anchor-id="axolotl.utils.chat_templates.base.template_handles_tools">template_handles_tools</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>utils.chat_templates.base.template_handles_tools(template)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Best-effort check for whether a chat template can render tool calls.</p>
+<p>Detects the two things a tool-capable template needs: a reference to the
+<code>tools</code> kwarg (so tool <em>definitions</em> injected at inference time are rendered)
+and/or handling of <code>tool_calls</code> / <code>role == "tool"</code> turns. A bare ChatML
+template (<code>&lt;|im_start|&gt;{role}\n{content}&lt;|im_end|&gt;</code>) matches none of these.</p>
+<p>This is intentionally conservative (substring based, no jinja parse): it only
+reports <code>True</code> when explicit tool markers are present, which is enough to
+flag a tool-capable -&gt; tool-blind downgrade at save time.</p>
+
+
 </section>
 </section>
 </section>
