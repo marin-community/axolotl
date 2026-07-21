@@ -1,6 +1,26 @@
+@.agents/marin-style/AGENTS-core.md
+
 # Axolotl
 
 Fine-tuning framework for LLMs. Config-driven: every training run is defined by a single YAML file.
+
+## Marin fork
+
+This repository is `marin-community/axolotl`, a fork of
+`axolotl-ai-cloud/axolotl`. The shared Marin standards linked above govern the
+Marin-owned delta. They take precedence for commit and PR prose, attribution,
+agent-created labels, error handling, and agent comments.
+
+Keep changes outside the Marin delta suitable for upstream. Do not reformat or
+re-lint upstream code. `[tool.marin-style]` in `pyproject.toml` limits the shared
+checks to the Marin integrations, fork gates, and infrastructure. Add new
+Marin-owned paths to that allowlist when the delta grows. The three explicit
+exclusions are existing lint debt; do not expand them.
+
+```bash
+infra/pre-commit.py --all-files --fix
+infra/pre-commit.py --review
+```
 
 ## Tech Stack
 
