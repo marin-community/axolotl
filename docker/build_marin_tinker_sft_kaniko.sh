@@ -19,7 +19,8 @@ curl -fsSL \
   -o crane.tgz
 tar -xzf crane.tgz crane
 install -m 0755 crane /usr/local/bin/crane
-crane export --platform linux/amd64 gcr.io/kaniko-project/executor:latest - | tar -xf - -C / || true
+crane export --platform linux/amd64 gcr.io/kaniko-project/executor:latest kaniko-rootfs.tar
+tar -xf kaniko-rootfs.tar -C / kaniko
 test -x /kaniko/executor
 
 DOCKER_CONFIG=/kaniko/.docker

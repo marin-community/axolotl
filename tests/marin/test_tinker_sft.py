@@ -52,4 +52,4 @@ def test_adapter_inventory_rejects_wrong_lora_shape(tmp_path: Path) -> None:
     (tmp_path / "adapter_model.safetensors").write_bytes(b"weights")
 
     with pytest.raises(RuntimeError, match="rank=128"):
-        tinker_sft.adapter_inventory(tmp_path)
+        tinker_sft.adapter_inventory(tmp_path, expected_rank=128, expected_alpha=1)

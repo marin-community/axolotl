@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 import hashlib
 import importlib.metadata
 import json
@@ -12,17 +11,17 @@ import re
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+import torch
 import yaml
 from datasets import load_dataset
 from huggingface_hub import HfApi
 
-MODEL_REPOSITORY = "Qwen/Qwen3.5-9B-Base"
-MODEL_REVISION = "68c46c4b3498877f3ef123c856ecfde50c39f404"
 DATASET_REPOSITORY = "open-thoughts/OpenThoughts3-1.2M"
 DATASET_REVISION = "61bcf9d4eb38b30295efc2021227a63cc5bb34c8"
 WORLD_SIZE = 8
@@ -66,21 +65,21 @@ def file_sha256(path: Path) -> str:
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def validate_revisions() -> dict[str, str]:
+def validate_revisions(config: dict[str, Any]) -> dict[str, str]:
+    model_repository = config["base_model"]
+    model_revision = config["revision_of_model"]
     api = HfApi()
-    model = api.model_info(MODEL_REPOSITORY, revision=MODEL_REVISION)
+    model = api.model_info(model_repository, revision=model_revision)
     dataset = api.dataset_info(DATASET_REPOSITORY, revision=DATASET_REVISION)
-    if model.sha != MODEL_REVISION or dataset.sha != DATASET_REVISION:
+    if model.sha != model_revision or dataset.sha != DATASET_REVISION:
         raise ValueError("Hugging Face did not resolve the pinned model and dataset revisions")
     return {"model": model.sha, "dataset": dataset.sha}
 
 
-def runtime_inventory(source_commit: str) -> dict[str, object]:
+def validate_runtime(source_commit: str) -> dict[str, object]:
     baked_commit = os.environ.get("AXOLOTL_SOURCE_COMMIT")
     if not COMMIT_PATTERN.fullmatch(source_commit) or baked_commit != source_commit:
         raise ValueError("--source-commit must match the commit baked into the task image")
-    import torch
-
     if torch.cuda.device_count() != WORLD_SIZE:
         raise ValueError(f"The SFT control requires exactly {WORLD_SIZE} visible GPUs")
     return {
@@ -118,11 +117,11 @@ def resolved_config(config_path: Path, work_root: Path, shape: StageShape) -> di
     return config
 
 
-def adapter_inventory(output_dir: Path) -> list[dict[str, str | int]]:
+def adapter_inventory(output_dir: Path, expected_rank: int, expected_alpha: int | float) -> list[dict[str, str | int]]:
     config_path = output_dir / "adapter_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    if config.get("r") != 128 or config.get("lora_alpha") != 1:
-        raise RuntimeError("The final adapter does not retain rank=128 and alpha=1")
+    if config.get("r") != expected_rank or config.get("lora_alpha") != expected_alpha:
+        raise RuntimeError(f"The final adapter does not retain rank={expected_rank} and alpha={expected_alpha}")
     paths = [config_path, *sorted(output_dir.glob("adapter_model*.safetensors"))]
     if len(paths) == 1:
         raise RuntimeError("Training completed without adapter safetensors")
@@ -161,11 +160,11 @@ def run(stage: Stage, config_path: Path, work_root: Path, source_commit: str, ou
     work_root.mkdir(parents=True)
     output_root = work_root / "output"
     output_root.mkdir()
-    runtime = runtime_inventory(source_commit)
-    revisions = validate_revisions()
+    runtime = validate_runtime(source_commit)
     dataset_path = work_root / "openthoughts3-tinker-order.jsonl"
     rows = materialize_dataset(dataset_path, shape)
     config = resolved_config(config_path, work_root, shape)
+    revisions = validate_revisions(config)
     resolved_path = output_root / "resolved-axolotl-config.yaml"
     resolved_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     command = (
@@ -199,7 +198,9 @@ def run(stage: Stage, config_path: Path, work_root: Path, source_commit: str, ou
             manifest["returncode"] = result.returncode
             manifest["status"] = "complete" if result.returncode == 0 else "failed"
             if result.returncode == 0:
-                manifest["adapter_files"] = adapter_inventory(Path(config["output_dir"]))
+                manifest["adapter_files"] = adapter_inventory(
+                    Path(config["output_dir"]), config["lora_r"], config["lora_alpha"]
+                )
         except Exception as error:
             manifest["status"] = "failed"
             manifest["failure"] = str(error)
