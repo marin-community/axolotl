@@ -25,6 +25,7 @@ from huggingface_hub import HfApi
 
 DATASET_REPOSITORY = "open-thoughts/OpenThoughts3-1.2M"
 DATASET_REVISION = "61bcf9d4eb38b30295efc2021227a63cc5bb34c8"
+DATASET_FILENAME = "openthoughts3-tinker-order.jsonl"
 WORLD_SIZE = 8
 FULL_STEPS = 3_000
 FULL_BATCH_SIZE = 128
@@ -78,9 +79,6 @@ def validate_revisions(config: dict[str, Any]) -> dict[str, str]:
 
 
 def validate_runtime(source_commit: str) -> dict[str, object]:
-    baked_commit = os.environ.get("AXOLOTL_SOURCE_COMMIT")
-    if not COMMIT_PATTERN.fullmatch(source_commit) or baked_commit != source_commit:
-        raise ValueError("--source-commit must match the commit baked into the task image")
     if torch.cuda.device_count() != WORLD_SIZE:
         raise ValueError(f"The SFT control requires exactly {WORLD_SIZE} visible GPUs")
     return {
@@ -92,6 +90,12 @@ def validate_runtime(source_commit: str) -> dict[str, object]:
         "datasets": importlib.metadata.version("datasets"),
         "nvidia_smi": subprocess.run(["nvidia-smi", "-q"], check=True, capture_output=True, text=True).stdout,
     }
+
+
+def validate_source_commit(source_commit: str) -> None:
+    baked_commit = os.environ.get("AXOLOTL_SOURCE_COMMIT")
+    if not COMMIT_PATTERN.fullmatch(source_commit) or baked_commit != source_commit:
+        raise ValueError("--source-commit must match the commit baked into the task image")
 
 
 def materialize_dataset(destination: Path, shape: StageShape) -> int:
@@ -107,9 +111,21 @@ def materialize_dataset(destination: Path, shape: StageShape) -> int:
     return count
 
 
+def dataset_inventory(path: Path, rows: int) -> dict[str, str | int]:
+    return {"rows": rows, "seed": 0, "sha256": file_sha256(path)}
+
+
+def staged_dataset_inventory(path: Path, expected_rows: int) -> dict[str, str | int]:
+    with path.open(encoding="utf-8") as source:
+        rows = sum(1 for _ in source)
+    if rows != expected_rows:
+        raise RuntimeError(f"Prepared dataset contains {rows} rows; expected {expected_rows}")
+    return dataset_inventory(path, rows)
+
+
 def resolved_config(config_path: Path, work_root: Path, shape: StageShape) -> dict[str, Any]:
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    config["datasets"][0]["path"] = str(work_root / "openthoughts3-tinker-order.jsonl")
+    config["datasets"][0]["path"] = str(work_root / DATASET_FILENAME)
     config["dataset_prepared_path"] = str(work_root / "prepared")
     config["output_dir"] = str(work_root / "output" / "peft")
     config["sequence_len"] = shape.sequence_length
@@ -129,10 +145,8 @@ def adapter_inventory(output_dir: Path, expected_rank: int, expected_alpha: int 
     return [{"path": path.name, "size": path.stat().st_size, "sha256": file_sha256(path)} for path in paths]
 
 
-def sync_output(output_root: Path, output_uri: str) -> None:
-    if not output_uri.startswith("s3://") or not output_uri.removeprefix("s3://").strip("/"):
-        raise ValueError("--output-uri must be a non-root s3:// prefix")
-    aws_config = output_root.parent / "aws-config"
+def configure_aws_environment(work_root: Path) -> dict[str, str]:
+    aws_config = work_root / "aws-config"
     inherited_config = Path(os.environ.get("AWS_CONFIG_FILE", Path.home() / ".aws" / "config"))
     if inherited_config.is_file() and inherited_config != aws_config:
         shutil.copyfile(inherited_config, aws_config)
@@ -142,11 +156,62 @@ def sync_output(output_root: Path, output_uri: str) -> None:
         check=True,
         env=environment,
     )
+    return environment
+
+
+def validate_s3_location(location: str, option: str) -> None:
+    bucket, separator, key = location.removeprefix("s3://").partition("/")
+    if not location.startswith("s3://") or not bucket or not separator or not key.strip("/"):
+        raise ValueError(f"{option} must identify a non-root s3:// location")
+
+
+def sync_output(output_root: Path, output_uri: str) -> None:
+    environment = configure_aws_environment(output_root.parent)
     subprocess.run(
         ["aws", "s3", "sync", str(output_root), output_uri.rstrip("/"), "--only-show-errors"],
         check=True,
         env=environment,
     )
+
+
+def stage_dataset(dataset_uri: str, destination: Path) -> None:
+    subprocess.run(
+        ["aws", "s3", "cp", dataset_uri, str(destination), "--only-show-errors"],
+        check=True,
+        env=configure_aws_environment(destination.parent),
+    )
+
+
+def create_output_root(work_root: Path) -> Path:
+    if work_root.exists():
+        raise ValueError(f"Work root already exists: {work_root}")
+    work_root.mkdir(parents=True)
+    output_root = work_root / "output"
+    output_root.mkdir()
+    return output_root
+
+
+def prepare_dataset(stage: Stage, work_root: Path, source_commit: str, output_uri: str) -> None:
+    validate_source_commit(source_commit)
+    validate_s3_location(output_uri, "--output-uri")
+    output_root = create_output_root(work_root)
+    dataset_path = output_root / DATASET_FILENAME
+    shape = STAGES[stage]
+    rows = materialize_dataset(dataset_path, shape)
+    inventory = dataset_inventory(dataset_path, rows)
+    manifest = {
+        "schema_version": 1,
+        "status": "complete",
+        "stage": stage,
+        "source_commit": source_commit,
+        "dataset": inventory,
+        "dataset_repository": DATASET_REPOSITORY,
+        "dataset_revision": DATASET_REVISION,
+    }
+    (output_root / "dataset-manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    sync_output(output_root, output_uri)
 
 
 @contextmanager
@@ -168,16 +233,28 @@ def periodic_output_sync(output_root: Path, output_uri: str, interval: int = SYN
         sync_output(output_root, output_uri)
 
 
-def run(stage: Stage, config_path: Path, work_root: Path, source_commit: str, output_uri: str) -> int:
-    if work_root.exists():
-        raise ValueError(f"Work root already exists: {work_root}")
+def run(
+    stage: Stage,
+    config_path: Path,
+    work_root: Path,
+    source_commit: str,
+    output_uri: str,
+    dataset_uri: str | None = None,
+) -> int:
+    validate_source_commit(source_commit)
+    validate_s3_location(output_uri, "--output-uri")
+    if dataset_uri is not None:
+        validate_s3_location(dataset_uri, "--dataset-uri")
     shape = STAGES[stage]
-    work_root.mkdir(parents=True)
-    output_root = work_root / "output"
-    output_root.mkdir()
+    output_root = create_output_root(work_root)
     runtime = validate_runtime(source_commit)
-    dataset_path = work_root / "openthoughts3-tinker-order.jsonl"
-    rows = materialize_dataset(dataset_path, shape)
+    dataset_path = work_root / DATASET_FILENAME
+    if dataset_uri is None:
+        rows = materialize_dataset(dataset_path, shape)
+        dataset = dataset_inventory(dataset_path, rows)
+    else:
+        stage_dataset(dataset_uri, dataset_path)
+        dataset = staged_dataset_inventory(dataset_path, shape.materialized_rows)
     config = resolved_config(config_path, work_root, shape)
     revisions = validate_revisions(config)
     resolved_path = output_root / "resolved-axolotl-config.yaml"
@@ -200,7 +277,7 @@ def run(stage: Stage, config_path: Path, work_root: Path, source_commit: str, ou
         "source_commit": source_commit,
         "runtime": runtime,
         "revisions": revisions,
-        "dataset": {"rows": rows, "seed": 0, "sha256": file_sha256(dataset_path)},
+        "dataset": dataset | {"uri": dataset_uri},
         "config_sha256": file_sha256(resolved_path),
         "command": command,
         "known_deviations": KNOWN_DEVIATIONS,
@@ -227,13 +304,22 @@ def run(stage: Stage, config_path: Path, work_root: Path, source_commit: str, ou
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=tuple(Stage), required=True)
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--work-root", type=Path, required=True)
-    parser.add_argument("--source-commit", required=True)
-    parser.add_argument("--output-uri", required=True)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    prepare_parser = subparsers.add_parser("prepare", help="Materialize and publish the pinned dataset")
+    train_parser = subparsers.add_parser("train", help="Run the SFT control")
+    for command_parser in (prepare_parser, train_parser):
+        command_parser.add_argument("--stage", choices=tuple(Stage), required=True)
+        command_parser.add_argument("--work-root", type=Path, required=True)
+        command_parser.add_argument("--source-commit", required=True)
+        command_parser.add_argument("--output-uri", required=True)
+    train_parser.add_argument("--config", type=Path, required=True)
+    train_parser.add_argument("--dataset-uri")
     args = parser.parse_args(argv)
-    return run(Stage(args.stage), args.config, args.work_root, args.source_commit, args.output_uri)
+    stage = Stage(args.stage)
+    if args.command == "prepare":
+        prepare_dataset(stage, args.work_root, args.source_commit, args.output_uri)
+        return 0
+    return run(stage, args.config, args.work_root, args.source_commit, args.output_uri, args.dataset_uri)
 
 
 if __name__ == "__main__":

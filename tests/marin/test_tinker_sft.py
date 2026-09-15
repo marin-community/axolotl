@@ -47,6 +47,14 @@ def test_materialization_preserves_the_external_stream_order(tmp_path: Path, mon
     ]
 
 
+def test_dataset_inventory_rejects_an_incomplete_prepared_artifact(tmp_path: Path) -> None:
+    destination = tmp_path / "data.jsonl"
+    destination.write_text('{"row":1}\n{"row":2}\n', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="2 rows; expected 3"):
+        tinker_sft.staged_dataset_inventory(destination, expected_rows=3)
+
+
 def test_adapter_inventory_rejects_wrong_lora_shape(tmp_path: Path) -> None:
     (tmp_path / "adapter_config.json").write_text(json.dumps({"r": 32, "lora_alpha": 1}), encoding="utf-8")
     (tmp_path / "adapter_model.safetensors").write_bytes(b"weights")
