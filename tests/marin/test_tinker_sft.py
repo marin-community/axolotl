@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -61,3 +62,26 @@ def test_adapter_inventory_rejects_wrong_lora_shape(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="rank=128"):
         tinker_sft.adapter_inventory(tmp_path, expected_rank=128, expected_alpha=1)
+
+
+def test_periodic_output_sync_survives_transient_upload_failure(tmp_path: Path, monkeypatch) -> None:
+    class StopAfterTwoAttempts:
+        waits = 0
+
+        def wait(self, _interval: int) -> bool:
+            self.waits += 1
+            return self.waits > 2
+
+    attempts = 0
+
+    def sync_output(_output_root: Path, _output_uri: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise subprocess.CalledProcessError(1, ["aws", "s3", "sync"])
+
+    monkeypatch.setattr(tinker_sft, "sync_output", sync_output)
+
+    tinker_sft._upload_until_stopped(tmp_path, "s3://bucket/prefix", StopAfterTwoAttempts(), interval=1)
+
+    assert attempts == 2
