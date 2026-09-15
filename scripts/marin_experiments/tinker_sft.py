@@ -8,6 +8,7 @@ import importlib.metadata
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -131,7 +132,21 @@ def adapter_inventory(output_dir: Path, expected_rank: int, expected_alpha: int 
 def sync_output(output_root: Path, output_uri: str) -> None:
     if not output_uri.startswith("s3://") or not output_uri.removeprefix("s3://").strip("/"):
         raise ValueError("--output-uri must be a non-root s3:// prefix")
-    subprocess.run(["aws", "s3", "sync", str(output_root), output_uri.rstrip("/"), "--only-show-errors"], check=True)
+    aws_config = output_root.parent / "aws-config"
+    inherited_config = Path(os.environ.get("AWS_CONFIG_FILE", Path.home() / ".aws" / "config"))
+    if inherited_config.is_file() and inherited_config != aws_config:
+        shutil.copyfile(inherited_config, aws_config)
+    environment = os.environ | {"AWS_CONFIG_FILE": str(aws_config)}
+    subprocess.run(
+        ["aws", "configure", "set", "default.s3.addressing_style", "virtual"],
+        check=True,
+        env=environment,
+    )
+    subprocess.run(
+        ["aws", "s3", "sync", str(output_root), output_uri.rstrip("/"), "--only-show-errors"],
+        check=True,
+        env=environment,
+    )
 
 
 @contextmanager
