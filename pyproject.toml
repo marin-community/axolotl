@@ -224,6 +224,7 @@ docstring-code-format = false
 checks = ["ruff-check"]
 ruff_version = "0.15.8"
 include = [
+    "scripts/marin_experiments/**",
     "scripts/marin_fork_gates/**",
     "src/axolotl/integrations/mfu/**",
     "src/axolotl/integrations/supabase_registry/**",
@@ -232,6 +233,7 @@ include = [
     "src/axolotl/utils/chat_templates/base.py",
     "src/axolotl/utils/data/lock.py",
     "tests/test_chat_template_export.py",
+    "tests/marin/**",
     "infra/**",
 ]
 exclude = [

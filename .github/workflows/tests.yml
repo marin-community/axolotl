@@ -26,7 +26,9 @@ jobs:
     name: tests
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The full parallel suite plus the intentionally isolated suites regularly
+    # reaches the old 30-minute ceiling on GitHub-hosted runners.
+    timeout-minutes: 45
     steps:
       - name: Free runner disk space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
