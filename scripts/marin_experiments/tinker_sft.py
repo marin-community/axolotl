@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import logging
 import os
 import re
 import shutil
@@ -32,7 +33,10 @@ FULL_BATCH_SIZE = 128
 FULL_SEQUENCE_LENGTH = 16_384
 FULL_SHUFFLE_BUFFER = FULL_STEPS * FULL_BATCH_SIZE
 SYNC_INTERVAL = 300
+AWS_MAX_ATTEMPTS = "20"
+AWS_RETRY_MODE = "adaptive"
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
+LOGGER = logging.getLogger(__name__)
 KNOWN_DEVIATIONS = (
     "Axolotl and Tinker use different distributed data loaders and training kernels.",
     "PEFT wraps Qwen3.5's fused Gated DeltaNet QKV projection with one adapter; Tinker exposes separate Q/K/V adapters.",
@@ -150,7 +154,11 @@ def configure_aws_environment(work_root: Path) -> dict[str, str]:
     inherited_config = Path(os.environ.get("AWS_CONFIG_FILE", Path.home() / ".aws" / "config"))
     if inherited_config.is_file() and inherited_config != aws_config:
         shutil.copyfile(inherited_config, aws_config)
-    environment = os.environ | {"AWS_CONFIG_FILE": str(aws_config)}
+    environment = os.environ | {
+        "AWS_CONFIG_FILE": str(aws_config),
+        "AWS_MAX_ATTEMPTS": AWS_MAX_ATTEMPTS,
+        "AWS_RETRY_MODE": AWS_RETRY_MODE,
+    }
     subprocess.run(
         ["aws", "configure", "set", "default.s3.addressing_style", "virtual"],
         check=True,
@@ -214,16 +222,24 @@ def prepare_dataset(stage: Stage, work_root: Path, source_commit: str, output_ur
     sync_output(output_root, output_uri)
 
 
+def _upload_until_stopped(output_root: Path, output_uri: str, stop: threading.Event, interval: int) -> None:
+    while not stop.wait(interval):
+        try:
+            sync_output(output_root, output_uri)
+        except subprocess.CalledProcessError:
+            LOGGER.exception("Periodic S3 output sync failed; retrying in %s seconds", interval)
+
+
 @contextmanager
 def periodic_output_sync(output_root: Path, output_uri: str, interval: int = SYNC_INTERVAL):
     stop = threading.Event()
-
-    def upload_until_stopped() -> None:
-        while not stop.wait(interval):
-            sync_output(output_root, output_uri)
-
     sync_output(output_root, output_uri)
-    uploader = threading.Thread(target=upload_until_stopped, daemon=True, name="tinker-sft-output-sync")
+    uploader = threading.Thread(
+        target=_upload_until_stopped,
+        args=(output_root, output_uri, stop, interval),
+        daemon=True,
+        name="tinker-sft-output-sync",
+    )
     uploader.start()
     try:
         yield
