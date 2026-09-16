@@ -24,6 +24,12 @@ import yaml
 from datasets import load_dataset
 from huggingface_hub import HfApi
 
+from scripts.marin_experiments.tinker_sft_checkpoints import (
+    missing_remote_checkpoints,
+    prune_published_checkpoints,
+    publish_completed_checkpoints,
+)
+
 DATASET_REPOSITORY = "open-thoughts/OpenThoughts3-1.2M"
 DATASET_REVISION = "61bcf9d4eb38b30295efc2021227a63cc5bb34c8"
 DATASET_FILENAME = "openthoughts3-tinker-order.jsonl"
@@ -32,7 +38,7 @@ FULL_STEPS = 3_000
 FULL_BATCH_SIZE = 128
 FULL_SEQUENCE_LENGTH = 16_384
 FULL_SHUFFLE_BUFFER = FULL_STEPS * FULL_BATCH_SIZE
-SYNC_INTERVAL = 300
+SYNC_INTERVAL = 60
 AWS_MAX_ATTEMPTS = "20"
 AWS_RETRY_MODE = "adaptive"
 IRIS_FALLBACK_DIRNAME = "tinker-sft-output"
@@ -229,12 +235,18 @@ def prepare_dataset(stage: Stage, work_root: Path, source_commit: str, output_ur
     sync_output(output_root, output_uri)
 
 
-def _upload_until_stopped(output_root: Path, output_uri: str, stop: threading.Event, interval: int) -> None:
+def _upload_until_stopped(
+    output_root: Path, output_uri: str, stop: threading.Event, interval: int, checkpoint_cadence: int = 2
+) -> None:
     while not stop.wait(interval):
         try:
             sync_output(output_root, output_uri)
-        except subprocess.CalledProcessError:
-            LOGGER.exception("Periodic S3 output sync failed; retrying in %s seconds", interval)
+            published = publish_completed_checkpoints(
+                output_root, output_uri, cadence=checkpoint_cadence, world_size=WORLD_SIZE
+            )
+            prune_published_checkpoints(output_root, published)
+        except Exception:
+            LOGGER.exception("Periodic S3 checkpoint publication failed; retrying in %s seconds", interval)
 
 
 def preserve_iris_output(output_root: Path, iris_output_dir: Path) -> Path:
@@ -275,12 +287,13 @@ def periodic_output_sync(
     output_uri: str,
     interval: int = SYNC_INTERVAL,
     iris_output_dir: Path | None = None,
+    checkpoint_cadence: int = 2,
 ):
     stop = threading.Event()
     sync_output(output_root, output_uri)
     uploader = threading.Thread(
         target=_upload_until_stopped,
-        args=(output_root, output_uri, stop, interval),
+        args=(output_root, output_uri, stop, interval, checkpoint_cadence),
         daemon=True,
         name="tinker-sft-output-sync",
     )
@@ -289,11 +302,20 @@ def periodic_output_sync(
         yield
     finally:
         stop.set()
-        uploader.join(timeout=10)
+        uploader.join()
         fallback = preserve_iris_output(output_root, iris_output_dir) if iris_output_dir is not None else None
         try:
             sync_output(output_root, output_uri)
-        except subprocess.CalledProcessError as error:
+            published = publish_completed_checkpoints(
+                output_root, output_uri, cadence=checkpoint_cadence, world_size=WORLD_SIZE
+            )
+            prune_published_checkpoints(output_root, published)
+            manifest = json.loads((output_root / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+            if manifest.get("status") == "complete":
+                expected = range(checkpoint_cadence, manifest["shape"]["steps"] + 1, checkpoint_cadence)
+                if missing := missing_remote_checkpoints(output_uri, expected):
+                    raise ArtifactPublicationError(f"Unpublished SFT checkpoints: {missing}")
+        except Exception as error:
             if fallback is None:
                 raise
             raise ArtifactPublicationError(
@@ -353,7 +375,8 @@ def run(
     }
     manifest_path = output_root / MANIFEST_FILENAME
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    with periodic_output_sync(output_root, output_uri, iris_output_dir=iris_output_dir):
+    cadence = 2 if stage == Stage.FULL else 1
+    with periodic_output_sync(output_root, output_uri, iris_output_dir=iris_output_dir, checkpoint_cadence=cadence):
         try:
             result = subprocess.run(command, check=False)
             manifest["returncode"] = result.returncode

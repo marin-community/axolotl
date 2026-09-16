@@ -3,10 +3,99 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from fsspec.implementations.memory import MemoryFileSystem
 
 from scripts.marin_experiments import tinker_sft
+from scripts.marin_experiments.tinker_sft_checkpoints import (
+    missing_remote_checkpoints,
+    prune_published_checkpoints,
+    publish_completed_checkpoints,
+)
 
 RECIPE = Path(__file__).parents[2] / "examples" / "marin" / "tinker-openthoughts3-sft.yaml"
+
+
+def checkpoint_fixture(output_root: Path, step: int, world_size: int = 2) -> Path:
+    checkpoint = output_root / "peft" / f"checkpoint-{step}"
+    checkpoint.mkdir(parents=True)
+    for name in (
+        "adapter_config.json",
+        "adapter_model.safetensors",
+        "chat_template.jinja",
+        "optimizer.pt",
+        "scheduler.pt",
+        "training_args.bin",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "tokens_state.json",
+        *(f"rng_state_{rank}.pth" for rank in range(world_size)),
+    ):
+        (checkpoint / name).write_bytes(name.encode())
+    (checkpoint / "trainer_state.json").write_text(json.dumps({"global_step": step}), encoding="utf-8")
+    return checkpoint
+
+
+def test_checkpoint_publication_waits_for_complete_remote_files(tmp_path: Path) -> None:
+    checkpoint = checkpoint_fixture(tmp_path, step=2)
+    filesystem = MemoryFileSystem()
+    remote_root = f"bucket/{tmp_path.as_posix().strip('/')}"
+    remote_checkpoint = f"{remote_root}/peft/checkpoint-2"
+    for path in checkpoint.iterdir():
+        if path.name != "optimizer.pt":
+            filesystem.pipe(f"{remote_checkpoint}/{path.name}", path.read_bytes())
+
+    published = publish_completed_checkpoints(
+        tmp_path, f"s3://{remote_root}", cadence=2, world_size=2, filesystem=filesystem
+    )
+
+    assert published == []
+    assert not filesystem.exists(f"{remote_checkpoint}/checkpoint-commit.json")
+
+    filesystem.pipe(f"{remote_checkpoint}/optimizer.pt", (checkpoint / "optimizer.pt").read_bytes())
+    published = publish_completed_checkpoints(
+        tmp_path, f"s3://{remote_root}", cadence=2, world_size=2, filesystem=filesystem
+    )
+
+    assert published == [2]
+    with filesystem.open(f"{remote_checkpoint}/checkpoint-commit.json", "r") as source:
+        marker = json.load(source)
+    assert marker["step"] == 2
+    assert marker["files"]["optimizer.pt"] == (checkpoint / "optimizer.pt").stat().st_size
+
+
+def test_checkpoint_publication_rejects_wrong_or_unfinished_step(tmp_path: Path) -> None:
+    checkpoint = checkpoint_fixture(tmp_path, step=2)
+    filesystem = MemoryFileSystem()
+
+    (checkpoint / "trainer_state.json").unlink()
+    assert publish_completed_checkpoints(
+        tmp_path, f"s3://bucket/{tmp_path.name}", cadence=2, world_size=2, filesystem=filesystem
+    ) == []
+
+    (checkpoint / "trainer_state.json").write_text('{"global_step": 4}', encoding="utf-8")
+    with pytest.raises(ValueError, match="does not describe step 2"):
+        publish_completed_checkpoints(
+            tmp_path, f"s3://bucket/{tmp_path.name}", cadence=2, world_size=2, filesystem=filesystem
+        )
+
+
+def test_local_checkpoint_cleanup_keeps_remote_committed_history(tmp_path: Path) -> None:
+    filesystem = MemoryFileSystem()
+    remote_root = f"bucket/{tmp_path.as_posix().strip('/')}"
+    for step in (2, 4, 6):
+        checkpoint = checkpoint_fixture(tmp_path, step)
+        for path in checkpoint.iterdir():
+            filesystem.pipe(f"{remote_root}/peft/checkpoint-{step}/{path.name}", path.read_bytes())
+
+    published = publish_completed_checkpoints(
+        tmp_path, f"s3://{remote_root}", cadence=2, world_size=2, filesystem=filesystem
+    )
+    prune_published_checkpoints(tmp_path, published)
+
+    assert not (tmp_path / "peft" / "checkpoint-2").exists()
+    assert (tmp_path / "peft" / "checkpoint-4").is_dir()
+    assert (tmp_path / "peft" / "checkpoint-6").is_dir()
+    assert missing_remote_checkpoints(f"s3://{remote_root}", range(2, 7, 2), filesystem) == []
 
 
 def test_full_stage_resolves_the_published_training_contract(tmp_path: Path) -> None:
