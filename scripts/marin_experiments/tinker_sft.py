@@ -35,6 +35,10 @@ FULL_SHUFFLE_BUFFER = FULL_STEPS * FULL_BATCH_SIZE
 SYNC_INTERVAL = 300
 AWS_MAX_ATTEMPTS = "20"
 AWS_RETRY_MODE = "adaptive"
+IRIS_FALLBACK_DIRNAME = "tinker-sft-output"
+ADAPTER_DIRNAME = "peft"
+MANIFEST_FILENAME = "tinker-sft-manifest.json"
+RESOLVED_CONFIG_FILENAME = "resolved-axolotl-config.yaml"
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 LOGGER = logging.getLogger(__name__)
 KNOWN_DEVIATIONS = (
@@ -47,6 +51,10 @@ class Stage(StrEnum):
     PLUMBING = "plumbing"
     FIDELITY_STEP = "fidelity_step"
     FULL = "full"
+
+
+class ArtifactPublicationError(RuntimeError):
+    """Remote publication failed after Iris preserved the final artifacts."""
 
 
 @dataclass(frozen=True)
@@ -130,7 +138,7 @@ def resolved_config(config_path: Path, work_root: Path, shape: StageShape) -> di
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     config["datasets"][0]["path"] = str(work_root / DATASET_FILENAME)
     config["dataset_prepared_path"] = str(work_root / "prepared")
-    config["output_dir"] = str(work_root / "output" / "peft")
+    config["output_dir"] = str(work_root / "output" / ADAPTER_DIRNAME)
     config["sequence_len"] = shape.sequence_length
     config["gradient_accumulation_steps"] = shape.global_batch_size // WORLD_SIZE
     config["max_steps"] = shape.steps
@@ -229,8 +237,45 @@ def _upload_until_stopped(output_root: Path, output_uri: str, stop: threading.Ev
             LOGGER.exception("Periodic S3 output sync failed; retrying in %s seconds", interval)
 
 
+def preserve_iris_output(output_root: Path, iris_output_dir: Path) -> Path:
+    iris_output_dir.mkdir(parents=True, exist_ok=True)
+    destination = iris_output_dir / IRIS_FALLBACK_DIRNAME
+    staging = iris_output_dir / f".{IRIS_FALLBACK_DIRNAME}.tmp"
+    if destination.exists() or staging.exists():
+        raise FileExistsError(f"Iris output fallback already exists under {iris_output_dir}")
+    manifest_path = output_root / MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    adapter_files = manifest.get("adapter_files", [])
+    if manifest.get("status") == "complete" and not adapter_files:
+        raise RuntimeError("Completed training manifest does not identify adapter files")
+    staging.mkdir()
+    shutil.copy2(manifest_path, staging / manifest_path.name)
+    resolved_config = output_root / RESOLVED_CONFIG_FILENAME
+    if resolved_config.is_file():
+        shutil.copy2(resolved_config, staging / resolved_config.name)
+    fallback_adapter_dir = staging / ADAPTER_DIRNAME
+    fallback_adapter_dir.mkdir()
+    for artifact in adapter_files:
+        relative_path = Path(artifact["path"])
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise ValueError(f"Adapter artifact path escapes the output directory: {relative_path}")
+        source = output_root / ADAPTER_DIRNAME / relative_path
+        if not source.is_file():
+            raise FileNotFoundError(f"Adapter artifact is missing: {source}")
+        target = fallback_adapter_dir / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    staging.replace(destination)
+    return destination
+
+
 @contextmanager
-def periodic_output_sync(output_root: Path, output_uri: str, interval: int = SYNC_INTERVAL):
+def periodic_output_sync(
+    output_root: Path,
+    output_uri: str,
+    interval: int = SYNC_INTERVAL,
+    iris_output_dir: Path | None = None,
+):
     stop = threading.Event()
     sync_output(output_root, output_uri)
     uploader = threading.Thread(
@@ -245,7 +290,15 @@ def periodic_output_sync(output_root: Path, output_uri: str, interval: int = SYN
     finally:
         stop.set()
         uploader.join(timeout=10)
-        sync_output(output_root, output_uri)
+        fallback = preserve_iris_output(output_root, iris_output_dir) if iris_output_dir is not None else None
+        try:
+            sync_output(output_root, output_uri)
+        except subprocess.CalledProcessError as error:
+            if fallback is None:
+                raise
+            raise ArtifactPublicationError(
+                f"Remote publication failed; final artifacts are preserved under {fallback}"
+            ) from error
 
 
 def run(
@@ -255,6 +308,7 @@ def run(
     source_commit: str,
     output_uri: str,
     dataset_uri: str | None = None,
+    iris_output_dir: Path | None = None,
 ) -> int:
     validate_source_commit(source_commit)
     validate_s3_location(output_uri, "--output-uri")
@@ -272,7 +326,7 @@ def run(
         dataset = staged_dataset_inventory(dataset_path, shape.materialized_rows)
     config = resolved_config(config_path, work_root, shape)
     revisions = validate_revisions(config)
-    resolved_path = output_root / "resolved-axolotl-config.yaml"
+    resolved_path = output_root / RESOLVED_CONFIG_FILENAME
     resolved_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     command = (
         "axolotl",
@@ -297,9 +351,9 @@ def run(
         "command": command,
         "known_deviations": KNOWN_DEVIATIONS,
     }
-    manifest_path = output_root / "tinker-sft-manifest.json"
+    manifest_path = output_root / MANIFEST_FILENAME
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    with periodic_output_sync(output_root, output_uri):
+    with periodic_output_sync(output_root, output_uri, iris_output_dir=iris_output_dir):
         try:
             result = subprocess.run(command, check=False)
             manifest["returncode"] = result.returncode
@@ -334,7 +388,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prepare":
         prepare_dataset(stage, args.work_root, args.source_commit, args.output_uri)
         return 0
-    return run(stage, args.config, args.work_root, args.source_commit, args.output_uri, args.dataset_uri)
+    iris_output = os.environ.get("IRIS_OUTPUT_DIR")
+    iris_output_dir = Path(iris_output) if iris_output else None
+    return run(
+        stage,
+        args.config,
+        args.work_root,
+        args.source_commit,
+        args.output_uri,
+        args.dataset_uri,
+        iris_output_dir,
+    )
 
 
 if __name__ == "__main__":
