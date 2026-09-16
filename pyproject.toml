@@ -227,6 +227,7 @@ include = [
     "scripts/marin_experiments/**",
     "scripts/marin_fork_gates/**",
     "src/axolotl/integrations/mfu/**",
+    "src/axolotl/integrations/qwen35_split_qkv/**",
     "src/axolotl/integrations/supabase_registry/**",
     "src/axolotl/integrations/template_integrity/**",
     "src/axolotl/utils/chat_templates/__init__.py",

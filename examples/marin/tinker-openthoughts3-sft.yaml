@@ -2,6 +2,8 @@ base_model: Qwen/Qwen3.5-9B-Base
 revision_of_model: 68c46c4b3498877f3ef123c856ecfde50c39f404
 trust_remote_code: false
 strict: false
+plugins:
+  - axolotl.integrations.qwen35_split_qkv.Qwen35SplitQKVPlugin
 
 chat_template: qwen3_5
 datasets:
@@ -38,7 +40,9 @@ lora_target_modules:
   - gate_proj
   - up_proj
   - down_proj
-  - linear_attn.in_proj_qkv
+  - in_proj_q
+  - in_proj_k
+  - in_proj_v
   - linear_attn.in_proj_z
   - linear_attn.out_proj
   - lm_head
