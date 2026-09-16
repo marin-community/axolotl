@@ -29,7 +29,12 @@ install -D -m 0644 \
 while IFS= read -r source; do
   relative=${source#"$REPOSITORY_ROOT/"}
   install -D -m 0644 "$source" "$LAYER_ROOT/$IMAGE_WORKDIR/$relative"
-done < <(find "$REPOSITORY_ROOT/scripts/marin_experiments" -type f -name '*.py' -print | sort)
+done < <(
+  find \
+    "$REPOSITORY_ROOT/scripts/marin_experiments" \
+    "$REPOSITORY_ROOT/src/axolotl/integrations/qwen35_split_qkv" \
+    -type f -name '*.py' -print | sort
+)
 
 tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
   -czf "$CRANE_ROOT/recipe-layer.tar.gz" -C "$LAYER_ROOT" "${IMAGE_WORKDIR%%/*}"
