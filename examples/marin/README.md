@@ -29,6 +29,18 @@ python -m axolotl.integrations.qwen35_split_qkv.adapter \
 The converter uses block-diagonal output factors and preserves the original LoRA scaling. The external evaluator
 performs this conversion for each durable checkpoint without modifying the training artifact.
 
+After a checkpoint's `checkpoint-commit.json` appears, convert it on a same-region CPU task:
+
+```bash
+python -m scripts.marin_experiments.tinker_sft_adapter \
+  --checkpoint-uri s3://bucket/path/tinker-sft/full/peft/checkpoint-2 \
+  --output-uri s3://bucket/path/tinker-sft/eval-adapters/checkpoint-2 \
+  --source-commit "$AXOLOTL_SOURCE_COMMIT"
+```
+
+The converter verifies the committed remote checkpoint, records source and output hashes, and writes
+`conversion-manifest.json` last. Pass that fused adapter directory to MarinSkyRL's native AIME evaluator.
+
 Run the plumbing stage on one eight-H100 node:
 
 ```bash

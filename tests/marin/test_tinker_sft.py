@@ -3,9 +3,12 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import torch
 from fsspec.implementations.memory import MemoryFileSystem
+from safetensors.torch import load_file, save_file
 
 from scripts.marin_experiments import tinker_sft
+from scripts.marin_experiments.tinker_sft_adapter import convert_committed_checkpoint
 from scripts.marin_experiments.tinker_sft_checkpoints import (
     missing_remote_checkpoints,
     prune_published_checkpoints,
@@ -33,6 +36,75 @@ def checkpoint_fixture(output_root: Path, step: int, world_size: int = 2) -> Pat
         (checkpoint / name).write_bytes(name.encode())
     (checkpoint / "trainer_state.json").write_text(json.dumps({"global_step": step}), encoding="utf-8")
     return checkpoint
+
+
+def split_adapter_fixture(path: Path) -> None:
+    path.mkdir(exist_ok=True)
+    (path / "adapter_config.json").write_text(
+        json.dumps({"r": 2, "lora_alpha": 1, "target_modules": ["in_proj_q", "in_proj_k", "in_proj_v"]}),
+        encoding="utf-8",
+    )
+    prefix = "base_model.model.model.language_model.layers.0.linear_attn"
+    weights = {}
+    for projection in ("q", "k", "v"):
+        weights[f"{prefix}.in_proj_{projection}.lora_A.weight"] = torch.ones(2, 4)
+        weights[f"{prefix}.in_proj_{projection}.lora_B.weight"] = torch.ones(3, 2)
+    save_file(weights, path / "adapter_model.safetensors")
+
+
+def test_remote_split_adapter_conversion_commits_complete_fused_output(tmp_path: Path) -> None:
+    source = checkpoint_fixture(tmp_path, step=2, world_size=8)
+    split_adapter_fixture(source)
+    filesystem = MemoryFileSystem()
+    remote_source = f"bucket/{tmp_path.as_posix().strip('/')}/checkpoint-2"
+    remote_output = f"bucket/{tmp_path.as_posix().strip('/')}/fused-2"
+    files = {path.name: path.stat().st_size for path in source.iterdir()}
+    for path in source.iterdir():
+        filesystem.pipe(f"{remote_source}/{path.name}", path.read_bytes())
+    filesystem.pipe(
+        f"{remote_source}/checkpoint-commit.json",
+        json.dumps({"schema_version": 1, "step": 2, "files": files}).encode(),
+    )
+
+    manifest = convert_committed_checkpoint(
+        f"s3://{remote_source}", f"s3://{remote_output}", "a" * 40, filesystem
+    )
+
+    assert manifest["status"] == "complete"
+    assert manifest["step"] == 2
+    assert filesystem.exists(f"{remote_output}/conversion-manifest.json")
+    fused_path = tmp_path / "fused.safetensors"
+    filesystem.get_file(f"{remote_output}/adapter_model.safetensors", str(fused_path))
+    fused = load_file(fused_path)
+    assert any(".in_proj_qkv." in key for key in fused)
+    assert not any(".in_proj_q." in key for key in fused)
+    fused_config = json.loads(filesystem.cat_file(f"{remote_output}/adapter_config.json"))
+    assert fused_config["rank_pattern"]["in_proj_qkv"] == 6
+    assert fused_config["alpha_pattern"]["in_proj_qkv"] == 3
+    assert convert_committed_checkpoint(
+        f"s3://{remote_source}", f"s3://{remote_output}", "a" * 40, filesystem
+    ) == manifest
+
+
+def test_remote_split_adapter_conversion_rejects_incomplete_checkpoint(tmp_path: Path) -> None:
+    source = checkpoint_fixture(tmp_path, step=2, world_size=8)
+    split_adapter_fixture(source)
+    filesystem = MemoryFileSystem()
+    remote_source = f"bucket/{tmp_path.as_posix().strip('/')}/checkpoint-2"
+    remote_output = f"bucket/{tmp_path.as_posix().strip('/')}/fused-2"
+    files = {path.name: path.stat().st_size for path in source.iterdir()}
+    for path in source.iterdir():
+        filesystem.pipe(f"{remote_source}/{path.name}", path.read_bytes())
+    filesystem.pipe(
+        f"{remote_source}/checkpoint-commit.json",
+        json.dumps({"schema_version": 1, "step": 2, "files": files}).encode(),
+    )
+    filesystem.pipe(f"{remote_source}/adapter_model.safetensors", b"incomplete")
+
+    with pytest.raises(ValueError, match="Incomplete committed SFT checkpoint"):
+        convert_committed_checkpoint(f"s3://{remote_source}", f"s3://{remote_output}", "a" * 40, filesystem)
+
+    assert not filesystem.exists(f"{remote_output}/conversion-manifest.json")
 
 
 def test_checkpoint_publication_waits_for_complete_remote_files(tmp_path: Path) -> None:
