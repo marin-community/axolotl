@@ -250,9 +250,9 @@ def preserve_iris_output(output_root: Path, iris_output_dir: Path) -> Path:
         raise RuntimeError("Completed training manifest does not identify adapter files")
     staging.mkdir()
     shutil.copy2(manifest_path, staging / manifest_path.name)
-    resolved_config = output_root / RESOLVED_CONFIG_FILENAME
-    if resolved_config.is_file():
-        shutil.copy2(resolved_config, staging / resolved_config.name)
+    resolved_config_path = output_root / RESOLVED_CONFIG_FILENAME
+    if resolved_config_path.is_file():
+        shutil.copy2(resolved_config_path, staging / resolved_config_path.name)
     fallback_adapter_dir = staging / ADAPTER_DIRNAME
     fallback_adapter_dir.mkdir()
     for artifact in adapter_files:
