@@ -11,6 +11,10 @@ of 128, truncated to 16,384 tokens. The rank-128 LoRA trains assistant turns and
 makes Axolotl's token-mean loss a per-example mean before gradient accumulation, matching the Tinker cookbook's datum
 normalization.
 
+Campaign runs save every two optimizer steps. The external MarinSkyRL
+evaluator consumes each durable checkpoint on AIME 2024; evaluation is not part
+of the Axolotl training process.
+
 Run the plumbing stage on one eight-H100 node:
 
 ```bash
