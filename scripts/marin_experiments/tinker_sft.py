@@ -39,7 +39,6 @@ COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 LOGGER = logging.getLogger(__name__)
 KNOWN_DEVIATIONS = (
     "Axolotl and Tinker use different distributed data loaders and training kernels.",
-    "PEFT wraps Qwen3.5's fused Gated DeltaNet QKV projection with one adapter; Tinker exposes separate Q/K/V adapters.",
     "Tinker's service-side LoRA initialization and scaling are not published.",
 )
 
