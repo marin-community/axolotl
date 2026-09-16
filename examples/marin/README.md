@@ -11,9 +11,10 @@ of 128, truncated to 16,384 tokens. The rank-128 LoRA trains assistant turns and
 makes Axolotl's token-mean loss a per-example mean before gradient accumulation, matching the Tinker cookbook's datum
 normalization.
 
-Campaign runs save every two optimizer steps. The external MarinSkyRL
-evaluator consumes each durable checkpoint on AIME 2024; evaluation is not part
-of the Axolotl training process.
+Campaign runs save every two optimizer steps. A `checkpoint-commit.json` marker appears under each remote checkpoint
+only after the trainer state identifies that step and every local file has a matching nonzero-size remote object. The
+runner keeps the two latest checkpoints locally and retains all committed checkpoints in S3. An external MarinSkyRL
+evaluator can consume these markers for AIME 2024; evaluation is not part of the Axolotl training process.
 
 Qwen3.5 stores each linear-attention Q/K/V projection in one fused base tensor, but Tinker trains three independent
 rank-128 adapters. The configured plugin exposes those projections independently during training. Before stock
@@ -64,8 +65,8 @@ python -m scripts.marin_experiments.tinker_sft train \
 
 `fidelity_step` consumes one full-shape batch, while `full` consumes all 3,000 steps. Each stage requires a new local
 and S3 prefix. Training verifies the prepared artifact's 384,000-row count and records its checksum. The runner uploads
-its resolved config, runtime and input provenance, checkpoints, and final adapter hashes every five minutes and at
-exit.
+its resolved config, runtime and input provenance, checkpoints, and final adapter hashes every minute and at exit. A
+successful full run requires remote markers for every two-step checkpoint.
 
 This is a cross-runtime reproduction, not a claim of identical optimizer trajectories. Axolotl and Tinker use
 different distributed loaders and kernels, and Tinker's LoRA initialization and scaling are not public.
