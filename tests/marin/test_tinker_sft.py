@@ -18,6 +18,8 @@ def test_full_stage_resolves_the_published_training_contract(tmp_path: Path) -> 
     assert config["max_steps"] == 3_000
     assert config["micro_batch_size"] == 1
     assert config["gradient_accumulation_steps"] == 16
+    assert config["excess_length_strategy"] == "truncate"
+    assert config["save_steps"] == 2
     assert (config["lora_r"], config["lora_alpha"]) == (128, 1)
     assert config["learning_rate"] == 1e-3
     assert (config["adam_beta1"], config["adam_beta2"], config["adam_epsilon"]) == (0.9, 0.95, 1e-8)

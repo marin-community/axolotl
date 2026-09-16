@@ -45,6 +45,7 @@ lora_target_modules:
 
 sample_packing: false
 pad_to_sequence_len: false
+excess_length_strategy: truncate
 micro_batch_size: 1
 num_epochs: 1
 
@@ -70,7 +71,7 @@ dataloader_drop_last: true
 
 logging_steps: 1
 save_strategy: steps
-save_steps: 50
+save_steps: 2
 eval_strategy: "no"
 special_tokens:
   eos_token: <|im_end|>
