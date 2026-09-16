@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -12,8 +13,17 @@ from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
 _PROJECTIONS = ("q", "k", "v")
+_PROJECTION_COUNT = len(_PROJECTIONS)
+_FUSED_PROJECTION = "in_proj_qkv"
 _ADAPTER_CONFIG = "adapter_config.json"
 _ADAPTER_WEIGHTS = "adapter_model.safetensors"
+
+
+@dataclass(frozen=True)
+class FusedFactors:
+    factor_a: torch.Tensor
+    factor_b: torch.Tensor
+    split_rank: int
 
 
 def _split_prefixes(weights: dict[str, torch.Tensor]) -> set[str]:
@@ -26,13 +36,17 @@ def _projection_key(prefix: str, projection: str, factor: str) -> str:
 
 
 def _fused_key(prefix: str, factor: str) -> str:
-    fused_prefix = prefix if prefix.endswith(".in_proj_qkv") else f"{prefix}.in_proj_qkv"
+    fused_prefix = (
+        prefix
+        if prefix.endswith(f".{_FUSED_PROJECTION}")
+        else f"{prefix}.{_FUSED_PROJECTION}"
+    )
     return f"{fused_prefix}.lora_{factor}.weight"
 
 
 def _fused_factors(
     weights: dict[str, torch.Tensor], prefix: str
-) -> tuple[torch.Tensor, torch.Tensor, int]:
+) -> FusedFactors:
     factors = {
         projection: (
             weights[_projection_key(prefix, projection, "A")],
@@ -46,7 +60,7 @@ def _fused_factors(
         raise ValueError(f"Split Q/K/V LoRA factors have incompatible shapes under {prefix}")
 
     rank = ranks.pop()
-    for projection, (factor_a, factor_b) in factors.items():
+    for projection, (_, factor_b) in factors.items():
         if factor_b.shape[1] != rank:
             raise ValueError(
                 f"in_proj_{projection} LoRA A/B ranks disagree under {prefix}"
@@ -54,7 +68,7 @@ def _fused_factors(
 
     fused_a = torch.cat([factors[projection][0] for projection in _PROJECTIONS], dim=0)
     output_dims = [factors[projection][1].shape[0] for projection in _PROJECTIONS]
-    fused_b = factors["q"][1].new_zeros((sum(output_dims), rank * 3))
+    fused_b = factors["q"][1].new_zeros((sum(output_dims), rank * _PROJECTION_COUNT))
     output_start = 0
     for rank_block, projection in enumerate(_PROJECTIONS):
         factor_b = factors[projection][1]
@@ -62,7 +76,7 @@ def _fused_factors(
         rank_start = rank_block * rank
         fused_b[output_start:output_stop, rank_start : rank_start + rank] = factor_b
         output_start = output_stop
-    return fused_a, fused_b, rank
+    return FusedFactors(factor_a=fused_a, factor_b=fused_b, split_rank=rank)
 
 
 def _fused_config(config: dict, fused_rank: int) -> dict:
@@ -70,9 +84,9 @@ def _fused_config(config: dict, fused_rank: int) -> dict:
         raise ValueError("Split-QKV adapter fusion supports standard LoRA scaling only")
 
     base_rank = config["r"]
-    if fused_rank != base_rank * 3:
+    if fused_rank != base_rank * _PROJECTION_COUNT:
         raise ValueError(
-            f"Expected fused QKV rank {base_rank * 3}, found {fused_rank}"
+            f"Expected fused QKV rank {base_rank * _PROJECTION_COUNT}, found {fused_rank}"
         )
 
     target_modules = set(config["target_modules"])
@@ -80,14 +94,14 @@ def _fused_config(config: dict, fused_rank: int) -> dict:
     if not split_targets.issubset(target_modules):
         raise ValueError("Adapter config does not target all split Q/K/V projections")
     target_modules.difference_update(split_targets)
-    target_modules.add("in_proj_qkv")
+    target_modules.add(_FUSED_PROJECTION)
 
     fused = dict(config)
     fused["target_modules"] = sorted(target_modules)
     rank_pattern = dict(fused.get("rank_pattern") or {})
     alpha_pattern = dict(fused.get("alpha_pattern") or {})
-    rank_pattern["in_proj_qkv"] = fused_rank
-    alpha_pattern["in_proj_qkv"] = config["lora_alpha"] * 3
+    rank_pattern[_FUSED_PROJECTION] = fused_rank
+    alpha_pattern[_FUSED_PROJECTION] = config["lora_alpha"] * _PROJECTION_COUNT
     fused["rank_pattern"] = rank_pattern
     fused["alpha_pattern"] = alpha_pattern
     return fused
@@ -111,16 +125,16 @@ def fuse_split_qkv_adapter(input_path: Path, output_path: Path) -> None:
     fused_weights = dict(weights)
     fused_rank: int | None = None
     for prefix in sorted(prefixes):
-        fused_a, fused_b, split_rank = _fused_factors(weights, prefix)
-        candidate_rank = split_rank * 3
+        factors = _fused_factors(weights, prefix)
+        candidate_rank = factors.split_rank * _PROJECTION_COUNT
         if fused_rank is not None and candidate_rank != fused_rank:
             raise ValueError("Split QKV LoRA ranks differ across layers")
         fused_rank = candidate_rank
         for projection in _PROJECTIONS:
             for factor in ("A", "B"):
                 del fused_weights[_projection_key(prefix, projection, factor)]
-        fused_weights[_fused_key(prefix, "A")] = fused_a
-        fused_weights[_fused_key(prefix, "B")] = fused_b
+        fused_weights[_fused_key(prefix, "A")] = factors.factor_a
+        fused_weights[_fused_key(prefix, "B")] = factors.factor_b
 
     assert fused_rank is not None
     output_path.mkdir(parents=True, exist_ok=False)

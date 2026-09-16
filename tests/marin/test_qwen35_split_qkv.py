@@ -30,6 +30,25 @@ def _linear_attention() -> Qwen3_5GatedDeltaNet:
     return Qwen3_5GatedDeltaNet(config, layer_idx=0)
 
 
+def _add_split_lora(
+    attention: Qwen3_5GatedDeltaNet, target_modules: list[str]
+) -> PeftModel:
+    return get_peft_model(
+        attention,
+        LoraConfig(
+            r=2, lora_alpha=1, lora_dropout=0, target_modules=target_modules
+        ),
+    )
+
+
+def _fill_split_lora(model: PeftModel) -> None:
+    split = model.base_model.model.in_proj_qkv
+    for index, projection in enumerate(("q", "k", "v"), start=1):
+        layer = getattr(split, f"in_proj_{projection}")
+        layer.lora_A["default"].weight.data.fill_(index / 10)
+        layer.lora_B["default"].weight.data.fill_(index / 20)
+
+
 def test_split_qkv_lora_matches_three_independent_updates() -> None:
     torch.manual_seed(17)
     attention = _linear_attention()
@@ -50,21 +69,12 @@ def test_split_qkv_lora_matches_three_independent_updates() -> None:
     torch.testing.assert_close(actual_base, expected_base)
     torch.testing.assert_close(actual_gradient, expected_gradient)
 
-    model = get_peft_model(
-        attention,
-        LoraConfig(
-            r=2,
-            lora_alpha=1,
-            lora_dropout=0,
-            target_modules=["in_proj_q", "in_proj_k", "in_proj_v"],
-        ),
-    )
+    model = _add_split_lora(attention, ["in_proj_q", "in_proj_k", "in_proj_v"])
+    _fill_split_lora(model)
     split = model.base_model.model.in_proj_qkv
     expected_updates = []
-    for index, projection in enumerate(("q", "k", "v"), start=1):
+    for projection in ("q", "k", "v"):
         layer = getattr(split, f"in_proj_{projection}")
-        layer.lora_A["default"].weight.data.fill_(index / 10)
-        layer.lora_B["default"].weight.data.fill_(index / 20)
         expected_updates.append(
             layer.lora_B["default"](layer.lora_A["default"](inputs))
             * layer.scaling["default"]
@@ -82,20 +92,10 @@ def _write_split_adapter(path: Path) -> dict[str, torch.Tensor]:
         ),
         attention,
     )
-    model = get_peft_model(
-        attention,
-        LoraConfig(
-            r=2,
-            lora_alpha=1,
-            lora_dropout=0,
-            target_modules=["in_proj_q", "in_proj_k", "in_proj_v", "out_proj"],
-        ),
+    model = _add_split_lora(
+        attention, ["in_proj_q", "in_proj_k", "in_proj_v", "out_proj"]
     )
-    split = model.base_model.model.in_proj_qkv
-    for index, projection in enumerate(("q", "k", "v"), start=1):
-        layer = getattr(split, f"in_proj_{projection}")
-        layer.lora_A["default"].weight.data.fill_(index / 10)
-        layer.lora_B["default"].weight.data.fill_(index / 20)
+    _fill_split_lora(model)
     model.base_model.model.out_proj.lora_A["default"].weight.data.normal_()
     model.base_model.model.out_proj.lora_B["default"].weight.data.normal_()
     model.save_pretrained(path, safe_serialization=True)
