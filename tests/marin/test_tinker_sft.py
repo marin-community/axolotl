@@ -87,3 +87,50 @@ def test_periodic_output_sync_survives_transient_upload_failure(tmp_path: Path, 
     tinker_sft._upload_until_stopped(tmp_path, "s3://bucket/prefix", StopAfterTwoAttempts(), interval=1)
 
     assert attempts == 2
+
+
+def test_periodic_output_sync_preserves_final_artifacts_when_publication_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    output_root = tmp_path / "output"
+    adapter_dir = output_root / "peft"
+    adapter_dir.mkdir(parents=True)
+    manifest = {
+        "status": "complete",
+        "adapter_files": [
+            {"path": "adapter_config.json", "size": 2, "sha256": "unused"},
+            {"path": "adapter_model.safetensors", "size": 7, "sha256": "unused"},
+        ],
+    }
+    manifest_text = json.dumps(manifest, sort_keys=True) + "\n"
+    (output_root / "tinker-sft-manifest.json").write_text(manifest_text, encoding="utf-8")
+    (adapter_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (adapter_dir / "adapter_model.safetensors").write_bytes(b"weights")
+    checkpoint = adapter_dir / "checkpoint-2"
+    checkpoint.mkdir()
+    (checkpoint / "optimizer.pt").write_bytes(b"large transient state")
+    iris_output_dir = tmp_path / "iris-output"
+    iris_output_dir.mkdir()
+    attempts = 0
+
+    def sync_output(_output_root: Path, _output_uri: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise subprocess.CalledProcessError(1, ["aws", "s3", "sync"])
+
+    monkeypatch.setattr(tinker_sft, "sync_output", sync_output)
+
+    with pytest.raises(tinker_sft.ArtifactPublicationError):
+        with tinker_sft.periodic_output_sync(
+            output_root,
+            "s3://bucket/prefix",
+            iris_output_dir=iris_output_dir,
+        ):
+            pass
+
+    fallback = iris_output_dir / "tinker-sft-output"
+    assert (fallback / "tinker-sft-manifest.json").read_text(encoding="utf-8") == manifest_text
+    assert (fallback / "peft" / "adapter_config.json").read_text(encoding="utf-8") == "{}"
+    assert (fallback / "peft" / "adapter_model.safetensors").read_bytes() == b"weights"
+    assert not (fallback / "peft" / "checkpoint-2").exists()
